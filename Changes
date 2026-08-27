@@ -1,5 +1,11 @@
 Changes for Test::Nginx
 
+0.33
+
+*    feature: add a tls_client backend that shells out to an external TLS
+     client command (like curl for HTTP/2). Plain HTTP still uses the
+     socket backend. The command is not shipped.
+
 0.32 - 2026-03-03
 
 *    feature: add TEST_NGINX_VALGRIND_QUICK for faster Memcheck runs.

@@ -29,6 +29,7 @@ This distribution provides two testing modules for Nginx C module development:
     - [Test::Nginx::Socket::Lua](https://metacpan.org/pod/Test%3A%3ANginx%3A%3ASocket%3A%3ALua)
     - [Test::Nginx::Socket::Lua::Stream](https://metacpan.org/pod/Test%3A%3ANginx%3A%3ASocket%3A%3ALua%3A%3AStream)
     - [Test::Nginx::Socket::Lua::Dgram](https://metacpan.org/pod/Test%3A%3ANginx%3A%3ASocket%3A%3ALua%3A%3ADgram)
+    - [Test::Nginx::Socket::TLSClient](https://metacpan.org/pod/Test%3A%3ANginx%3A%3ASocket%3A%3ATLSClient) (send each request via an external TLS client, like `curl` for HTTP/2)
 
 - [Test::Nginx::LWP](https://metacpan.org/pod/Test%3A%3ANginx%3A%3ALWP) (This is obsolete.)
 
@@ -49,6 +50,19 @@ port number by setting his port number to the `TEST_NGINX_PORT` environment,
 as in
 
     export TEST_NGINX_PORT=1989
+
+To send requests via an external TLS client (plain HTTP still uses the
+socket backend):
+
+    export TEST_NGINX_TLS_CLIENT=my-tls-client
+    export TEST_NGINX_TLS_CLIENT_OPTIONS='--client chrome'
+    prove t
+
+or `use Test::Nginx::Socket::TLSClient;` / a per-block
+`--- tls_client: my-tls-client` section. The test nginx is given
+`listen ssl` automatically. This distribution does not ship the client
+command. Extra flags go in `TEST_NGINX_TLS_CLIENT_OPTIONS` /
+`--- tls_client_options`.
 
 # User Guide
 

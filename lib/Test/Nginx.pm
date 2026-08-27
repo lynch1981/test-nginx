@@ -39,6 +39,10 @@ L<Test::Nginx::Socket::Lua::Stream>
 
 L<Test::Nginx::Socket::Lua::Dgram>
 
+=item *
+
+L<Test::Nginx::Socket::TLSClient> (send requests via an external TLS client command)
+
 =back
 
 =item *
@@ -64,6 +68,11 @@ port number by setting his port number to the C<TEST_NGINX_PORT> environment,
 as in
 
     export TEST_NGINX_PORT=1989
+
+To send requests via an external TLS client, use
+L<Test::Nginx::Socket::TLSClient> or C<--- tls_client> /
+C<TEST_NGINX_TLS_CLIENT>. Plain HTTP still uses the socket backend.
+See L<Test::Nginx::Socket/tls_client>.
 
 =head1 User Guide
 
@@ -230,5 +239,5 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 =head1 SEE ALSO
 
-L<Test::Nginx::LWP>, L<Test::Nginx::Socket>, L<Test::Base>.
+L<Test::Nginx::LWP>, L<Test::Nginx::Socket>, L<Test::Nginx::Socket::TLSClient>, L<Test::Base>.
 

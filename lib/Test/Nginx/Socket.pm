@@ -51,6 +51,7 @@ our $UseValgrind = $ENV{TEST_NGINX_USE_VALGRIND};
 
 sub send_request ($$$$@);
 sub send_http_req_by_curl ($$$);
+sub send_http_req_by_tls_client ($$$);
 
 sub run_filter_helper($$$);
 sub run_test_helper ($$);
@@ -64,6 +65,7 @@ sub check_response_body ($$$$$$);
 sub fmt_str ($);
 sub gen_ab_cmd_from_req ($$@);
 sub gen_curl_cmd_from_req ($$);
+sub gen_tls_client_cmd_from_req ($$);
 sub get_linear_regression_slope ($);
 sub value_contains ($$);
 
@@ -1976,6 +1978,80 @@ sub send_http_req_by_curl ($$$) {
     return $out;
 }
 
+sub send_http_req_by_tls_client ($$$) {
+    my ($block, $req, $timeout) = @_;
+
+    my $name = $block->name;
+
+    my $cmd = gen_tls_client_cmd_from_req($block, $req);
+    my $raw = join '', map { $_->{value} } @$req;
+
+    if ($Test::Nginx::Util::Verbose) {
+        warn "running cmd @$cmd";
+    }
+
+    my $total_tries = $TotalConnectingTimeouts ? 20 : 50;
+    while ($total_tries-- > 0) {
+        if (is_tcp_port_used($ServerPortForClient)) {
+            last;
+        }
+
+        warn "$name - waiting for nginx to listen on port "
+            . "$ServerPortForClient, Retry connecting after 1 sec\n";
+        sleep 1;
+    }
+
+    my $bin = $cmd->[0];
+    if (!Test::Nginx::Util::can_run($bin)) {
+        bail_out("$name - TLS client command \"$bin\" not found in PATH. "
+                 . "Install it or set TEST_NGINX_TLS_CLIENT "
+                 . "(same idea as needing curl for HTTP/2).");
+    }
+
+    my $run_timeout = $timeout;
+    if (!defined $run_timeout || $run_timeout <= 0) {
+        $run_timeout = timeout();
+    }
+    $run_timeout += 1;
+
+    my $ok = IPC::Run::run($cmd, \$raw, \(my $out), \(my $err),
+                           IPC::Run::timeout($run_timeout));
+
+    if (!defined $ok) {
+        fail "failed to run tls_client: $?: " . ($err // '');
+        return;
+    }
+
+    if (!$out) {
+        if ($err) {
+            my $tls_err = $block->tls_client_error;
+            if (defined $tls_err) {
+                if (ref $tls_err && $err =~ /$tls_err/) {
+                    return;
+
+                } elsif ($err =~ /\Q$tls_err\E/) {
+                    return;
+                }
+
+                fail "$name - command \"@$cmd\" generates stderr output: $err";
+                return;
+            }
+
+            fail "$name - command \"@$cmd\" generates stderr output: $err";
+            return;
+        }
+
+        fail "$name - tls_client \"@$cmd\" generates no stdout output";
+        return;
+    }
+
+    if ($err) {
+        warn "WARNING: $name - command \"@$cmd\" generates stderr output: $err";
+    }
+
+    return $out;
+}
+
 sub send_request ($$$$@) {
     my ( $req, $middle_delay, $timeout, $block, $tries ) = @_;
 
@@ -1991,6 +2067,10 @@ sub send_request ($$$$@) {
             #warn "Found HEAD request!\n";
             $head_req = 1;
         }
+    }
+
+    if (use_tls_client($block)) {
+        return send_http_req_by_tls_client($block, $req, $timeout), $head_req;
     }
 
     if (use_http2($block) || use_http3($block)) {
@@ -2487,6 +2567,74 @@ sub gen_curl_cmd_from_req ($$) {
     }
 
     push @args, $link;
+
+    return \@args;
+}
+
+sub gen_tls_client_cmd_from_req ($$) {
+    my ($block, $req) = @_;
+
+    my $name = $block->name;
+    my $bin = resolve_tls_client($block);
+    if (!defined $bin || $bin eq '') {
+        bail_out("$name - no TLS client command; set TEST_NGINX_TLS_CLIENT or --- tls_client: COMMAND");
+    }
+
+    my $sni = $block->tls_client_sni;
+    if (!defined $sni || $sni =~ /^\s*$/) {
+        $sni = $block->server_name;
+    }
+    if (!defined $sni || $sni =~ /^\s*$/) {
+        $sni = $Test::Nginx::Util::ServerName;
+    }
+    $sni =~ s/^\s+|\s+$//g;
+
+    my $server_addr = $block->server_addr_for_client;
+    if (!defined $server_addr) {
+        $server_addr = $ServerAddr;
+    }
+    if ($server_addr =~ /:/ && $server_addr !~ /^\[/) {
+        $server_addr = "[$server_addr]";
+    }
+
+    my $addr = "$server_addr:$ServerPortForClient";
+
+    my $raw_tm = $block->timeout;
+    if (defined $raw_tm) {
+        $raw_tm =~ s/^\s+|\s+$//g;
+    }
+    my $tm = parse_time($raw_tm);
+    if (!defined $tm || $tm eq '') {
+        $tm = timeout();
+    }
+
+    my $optstr = $block->tls_client_options;
+    if (!defined $optstr || $optstr !~ /\S/) {
+        $optstr = $Test::Nginx::Util::TlsClientOptions;
+    }
+    my @opts;
+    if (defined $optstr && $optstr =~ /\S/) {
+        $optstr =~ s/^\s+|\s+$//g;
+        @opts = split /\s+/, $optstr;
+    }
+
+    my @args = (
+        $bin,
+        @opts,
+        '--addr', $addr,
+        '--sni', $sni,
+        '--timeout', $tm,
+    );
+
+    my $verify = defined $block->tls_client_verify
+                 || $Test::Nginx::Util::TlsClientVerify;
+    if (!$verify) {
+        push @args, '--insecure';
+    }
+
+    if ($Test::Nginx::Util::Verbose) {
+        push @args, '--verbose';
+    }
 
     return \@args;
 }
@@ -3200,6 +3348,73 @@ specified. For example, this section cannot be used with C<--- pipelined_request
 C<--- raw_request>.
 
 See also the L<TEST_NGINX_USE_HTTP2> system environment for the "http2" test mode.
+
+=head2 tls_client
+
+Sends the test request over TLS by running an external SSL/TLS client
+command (same idea as using C<curl> for L<http2> / L<http3>). Plain HTTP
+still uses the in-process socket backend; this path is TLS-only.
+
+The command is B<not> part of this distribution; it must be on C<PATH>.
+Any TLS client that speaks the contract below can be used.
+
+    --- tls_client: my-tls-client
+    --- tls_client_options: --client chrome
+    --- request
+        GET /t
+
+The value of C<--- tls_client> is the binary. If the section is present but
+empty, C<TEST_NGINX_TLS_CLIENT> is used.
+
+The harness always adds C<listen ... ssl> and a default self-signed
+certificate to the generated F<nginx.conf> (unless the test already has an
+SSL listen). It runs:
+
+    my-tls-client --client chrome \
+        --addr 127.0.0.1:1984 --sni localhost --timeout 3 --insecure
+
+C<--insecure> is passed by default because the test cert is self-signed.
+Use L<tls_client_verify> to verify the certificate.
+
+stdin is the raw HTTP/1.1 request; stdout must be a C<curl -i>-style
+HTTP/1.1 dump so C<--- response_body> and friends keep working.
+
+B<WARNING:> C<--- raw_request> and C<--- pipelined_requests> cannot be used
+with C<--- tls_client>. HTTP/3 / QUIC is also unsupported (use L<http3> / curl
+instead).
+
+See also L<tls_client_options>, L<TEST_NGINX_TLS_CLIENT>,
+and L<Test::Nginx::Socket::TLSClient>.
+
+=head2 no_tls_client
+
+Disables the TLS-client backend for this block even when
+C<TEST_NGINX_TLS_CLIENT> is set or the test file C<use>s
+L<Test::Nginx::Socket::TLSClient>.
+
+=head2 tls_client_options
+
+Extra command-line arguments for the TLS client (whitespace-separated),
+like L<curl_options>. Tool-specific flags belong here.
+
+    --- tls_client: my-tls-client
+    --- tls_client_options: --client firefox
+
+Also settable via C<TEST_NGINX_TLS_CLIENT_OPTIONS>.
+
+=head2 tls_client_sni
+
+TLS SNI passed as C<--sni>. Defaults to L<server_name> (C<localhost>).
+
+=head2 tls_client_verify
+
+When present, omit C<--insecure> so the client verifies the nginx
+certificate. Also enabled by C<TEST_NGINX_TLS_CLIENT_VERIFY>.
+
+=head2 tls_client_error
+
+Expected stderr from the TLS client (string or regexp), like
+L<curl_error>.
 
 =head2 curl_protocol
 
@@ -4473,6 +4688,38 @@ One can disable HTTP/3 mode for an individual test block by specifying the L<no_
 
     --- no_http3
 
+=head2 TEST_NGINX_TLS_CLIENT
+
+External TLS client command used for every test block (unless a block has
+L<no_tls_client>). Same idea as finding C<curl> on C<PATH> for HTTP/2.
+The nginx test server is configured with C<listen ssl>.
+
+    export TEST_NGINX_TLS_CLIENT=my-tls-client
+    export TEST_NGINX_TLS_CLIENT_OPTIONS='--client chrome'
+    prove t
+
+Cannot be combined with C<TEST_NGINX_USE_HTTP3>.
+
+See L<tls_client>.
+
+=head2 TEST_NGINX_TLS_CLIENT_OPTIONS
+
+Default extra argv for L<tls_client_options>.
+
+=head2 TEST_NGINX_TLS_CLIENT_VERIFY
+
+When set to a true value, omit C<--insecure> (same as L<tls_client_verify>).
+
+=head2 TEST_NGINX_SSL_CRT
+
+Path to the certificate used when the tls_client backend auto-configures
+C<listen ssl>. Falls back to L<TEST_NGINX_HTTP3_CRT>, then to a
+generated self-signed cert under F<t/servroot/cert/>.
+
+=head2 TEST_NGINX_SSL_KEY
+
+Private key companion of L<TEST_NGINX_SSL_CRT>.
+
 =head2 TEST_NGINX_HTTP3_CRT
 
 When running in http3 mode, you need to specify the default certificate.
@@ -5055,4 +5302,4 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 =head1 SEE ALSO
 
-L<Test::Nginx::Lua>, L<Test::Nginx::Lua::Stream>, L<Test::Nginx::LWP>, L<Test::Base>.
+L<Test::Nginx::Socket::Lua>, L<Test::Nginx::Socket::Lua::Stream>, L<Test::Nginx::Socket::TLSClient>, L<Test::Nginx::LWP>, L<Test::Base>.

@@ -33,3 +33,7 @@ t/valgrind_command.t
 lib/Test/Nginx/Socket/Lua.pm
 lib/Test/Nginx/Socket/Lua/Stream.pm
 lib/Test/Nginx/Socket/Lua/Dgram.pm
+lib/Test/Nginx/Socket/TLSClient.pm
+t/use_tls_client.t
+t/gen_tls_client.t
+t/tls-client-nginx.t
