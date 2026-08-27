@@ -51,6 +51,7 @@ our $UseValgrind = $ENV{TEST_NGINX_USE_VALGRIND};
 
 sub send_request ($$$$@);
 sub send_http_req_by_curl ($$$);
+sub send_http_req_by_utls ($$$);
 
 sub run_filter_helper($$$);
 sub run_test_helper ($$);
@@ -64,6 +65,7 @@ sub check_response_body ($$$$$$);
 sub fmt_str ($);
 sub gen_ab_cmd_from_req ($$@);
 sub gen_curl_cmd_from_req ($$);
+sub gen_utls_cmd_from_req ($$);
 sub get_linear_regression_slope ($);
 sub value_contains ($$);
 
@@ -1976,6 +1978,79 @@ sub send_http_req_by_curl ($$$) {
     return $out;
 }
 
+sub send_http_req_by_utls ($$$) {
+    my ($block, $req, $timeout) = @_;
+
+    my $name = $block->name;
+
+    my $cmd = gen_utls_cmd_from_req($block, $req);
+    my $raw = join '', map { $_->{value} } @$req;
+
+    if ($Test::Nginx::Util::Verbose) {
+        warn "running cmd @$cmd";
+    }
+
+    my $total_tries = $TotalConnectingTimeouts ? 20 : 50;
+    while ($total_tries-- > 0) {
+        if (is_tcp_port_used($ServerPortForClient)) {
+            last;
+        }
+
+        warn "$name - waiting for nginx to listen on port "
+            . "$ServerPortForClient, Retry connecting after 1 sec\n";
+        sleep 1;
+    }
+
+    my $bin = $cmd->[0];
+    if ($bin =~ m{[\\/]} && !-x $bin) {
+        bail_out("$name - uTLS helper not found: $bin. "
+                 . "Build go/utls-client (requires Go) or set TEST_NGINX_UTLS_BINARY.");
+    }
+
+    my $run_timeout = $timeout;
+    if (!defined $run_timeout || $run_timeout <= 0) {
+        $run_timeout = timeout();
+    }
+    $run_timeout += 1;
+
+    my $ok = IPC::Run::run($cmd, \$raw, \(my $out), \(my $err),
+                           IPC::Run::timeout($run_timeout));
+
+    if (!defined $ok) {
+        fail "failed to run test-nginx-utls: $?: " . ($err // '');
+        return;
+    }
+
+    if (!$out) {
+        if ($err) {
+            my $utls_err = $block->utls_error;
+            if (defined $utls_err) {
+                if (ref $utls_err && $err =~ /$utls_err/) {
+                    return;
+
+                } elsif ($err =~ /\Q$utls_err\E/) {
+                    return;
+                }
+
+                fail "$name - command \"@$cmd\" generates stderr output: $err";
+                return;
+            }
+
+            fail "$name - command \"@$cmd\" generates stderr output: $err";
+            return;
+        }
+
+        fail "$name - uTLS command \"@$cmd\" generates no stdout output";
+        return;
+    }
+
+    if ($err) {
+        warn "WARNING: $name - command \"@$cmd\" generates stderr output: $err";
+    }
+
+    return $out;
+}
+
 sub send_request ($$$$@) {
     my ( $req, $middle_delay, $timeout, $block, $tries ) = @_;
 
@@ -1991,6 +2066,10 @@ sub send_request ($$$$@) {
             #warn "Found HEAD request!\n";
             $head_req = 1;
         }
+    }
+
+    if (use_utls($block)) {
+        return send_http_req_by_utls($block, $req, $timeout), $head_req;
     }
 
     if (use_http2($block) || use_http3($block)) {
@@ -2487,6 +2566,80 @@ sub gen_curl_cmd_from_req ($$) {
     }
 
     push @args, $link;
+
+    return \@args;
+}
+
+sub gen_utls_cmd_from_req ($$) {
+    my ($block, $req) = @_;
+
+    my $bin = resolve_utls_binary();
+
+    my $client = $block->utls_client;
+    if (!defined $client || $client =~ /^\s*$/) {
+        $client = $Test::Nginx::Util::UtlsClient;
+    }
+    $client =~ s/^\s+|\s+$//g;
+
+    my $sni = $block->utls_sni;
+    if (!defined $sni || $sni =~ /^\s*$/) {
+        $sni = $block->server_name;
+    }
+    if (!defined $sni || $sni =~ /^\s*$/) {
+        $sni = $Test::Nginx::Util::ServerName;
+    }
+    $sni =~ s/^\s+|\s+$//g;
+
+    my $server_addr = $block->server_addr_for_client;
+    if (!defined $server_addr) {
+        $server_addr = $ServerAddr;
+    }
+    if ($server_addr =~ /:/ && $server_addr !~ /^\[/) {
+        $server_addr = "[$server_addr]";
+    }
+
+    my $addr = "$server_addr:$ServerPortForClient";
+
+    my $raw_tm = $block->timeout;
+    if (defined $raw_tm) {
+        $raw_tm =~ s/^\s+|\s+$//g;
+    }
+    my $tm = parse_time($raw_tm);
+    if (!defined $tm || $tm eq '') {
+        $tm = timeout();
+    }
+
+    my $http2_mode = 'auto';
+    if (defined $block->no_http2) {
+        $http2_mode = 'never';
+    } elsif (use_http2($block)) {
+        $http2_mode = 'require';
+    }
+
+    my @args = (
+        $bin,
+        '--client', $client,
+        '--addr', $addr,
+        '--sni', $sni,
+        '--timeout', $tm,
+        '--http2', $http2_mode,
+    );
+
+    my $verify = defined $block->utls_verify || $Test::Nginx::Util::UtlsVerify;
+    if (!$verify) {
+        push @args, '--insecure';
+    }
+
+    my $alpn = $block->utls_alpn;
+    if (defined $alpn && $alpn !~ /^\s*$/) {
+        $alpn =~ s/^\s+|\s+$//g;
+        $alpn =~ s/\s+/,/g;
+        push @args, '--alpn', $alpn;
+    }
+
+    if ($Test::Nginx::Util::Verbose) {
+        push @args, '--verbose';
+    }
 
     return \@args;
 }
@@ -3200,6 +3353,72 @@ specified. For example, this section cannot be used with C<--- pipelined_request
 C<--- raw_request>.
 
 See also the L<TEST_NGINX_USE_HTTP2> system environment for the "http2" test mode.
+
+=head2 utls
+
+Enforces the test scaffold to send the test request over TLS using the
+C<test-nginx-utls> helper, which parrots a browser ClientHello via
+L<uTLS|https://github.com/refraction-networking/utls>.
+
+    --- utls
+    --- utls_client: chrome
+    --- request
+        GET /t
+
+The helper is a small Go program under F<go/utls-client/>. Build it with
+C<make> (requires Go 1.24+) or point C<TEST_NGINX_UTLS_BINARY> at a
+prebuilt binary.
+
+When this mode is on, the scaffold adds C<listen ... ssl> and a default
+self-signed certificate to the generated F<nginx.conf> unless the test
+already has an SSL listen. Certificate verification is skipped by default
+(self-signed test certs).
+
+HTTP/2 over TLS is used when the fingerprint's ALPN negotiates C<h2> (or
+when C<--- http2> is also set). The helper always dumps an HTTP/1.1-style
+response so C<--- response_body> and friends keep working.
+
+B<WARNING:> C<--- raw_request> and C<--- pipelined_requests> cannot be used
+with C<--- utls>. HTTP/3 / QUIC is also unsupported (use L<http3> / curl
+instead). uTLS parrots the ClientHello only; the rest of the TLS stack is
+still Go.
+
+See also L<TEST_NGINX_USE_UTLS>, L<utls_client>, L<no_utls>, and
+L<Test::Nginx::Socket::UTLS>.
+
+=head2 no_utls
+
+Disables the uTLS backend for this block even when C<TEST_NGINX_USE_UTLS>
+is set or the test file C<use>s L<Test::Nginx::Socket::UTLS>.
+
+=head2 utls_client
+
+Selects the ClientHello fingerprint. Aliases: C<chrome>, C<firefox>,
+C<safari>, C<ios>, C<android>, C<edge>, C<randomized>, C<golang>. Exact
+uTLS IDs such as C<HelloChrome_120> are also accepted. Default is
+C<chrome> (or C<TEST_NGINX_UTLS_CLIENT>).
+
+    --- utls
+    --- utls_client: HelloFirefox_105
+
+=head2 utls_sni
+
+TLS SNI / C<ServerName>. Defaults to L<server_name> (C<localhost>).
+
+=head2 utls_alpn
+
+Comma- or space-separated ALPN override. Empty means "use the parrot's
+ALPN". Examples: C<h2>, C<http/1.1>, C<h2,http/1.1>.
+
+=head2 utls_verify
+
+When present, the helper verifies the nginx server certificate. Off by
+default. Also enabled by C<TEST_NGINX_UTLS_VERIFY>.
+
+=head2 utls_error
+
+Expected stderr from C<test-nginx-utls> (string or regexp), like
+L<curl_error>. Used for handshake failures.
 
 =head2 curl_protocol
 
@@ -4473,6 +4692,47 @@ One can disable HTTP/3 mode for an individual test block by specifying the L<no_
 
     --- no_http3
 
+=head2 TEST_NGINX_USE_UTLS
+
+Enables the uTLS SSL-client backend for every test block (unless a block
+has L<no_utls>). Each request is sent over TLS with a browser-like
+ClientHello via C<test-nginx-utls>.
+
+    export TEST_NGINX_USE_UTLS=1
+    export TEST_NGINX_UTLS_CLIENT=chrome
+    prove t
+
+Cannot be combined with C<TEST_NGINX_USE_HTTP3>. Combining with
+C<TEST_NGINX_USE_HTTP2> means HTTP/2 over TLS (ALPN C<h2>), not curl's
+h2c prior-knowledge mode.
+
+See L<utls>.
+
+=head2 TEST_NGINX_UTLS_CLIENT
+
+Default fingerprint when a block does not specify L<utls_client>.
+Default C<chrome>.
+
+=head2 TEST_NGINX_UTLS_BINARY
+
+Path to the C<test-nginx-utls> helper. If unset, the scaffold looks for
+F<go/utls-client/test-nginx-utls> and then C<test-nginx-utls> on C<PATH>.
+
+=head2 TEST_NGINX_UTLS_VERIFY
+
+When set to a true value, verify the nginx TLS certificate. Default is
+off (equivalent to curl's C<-k>).
+
+=head2 TEST_NGINX_SSL_CRT
+
+Path to the certificate used when the uTLS backend auto-configures
+C<listen ssl>. Falls back to L<TEST_NGINX_HTTP3_CRT>, then to a
+generated self-signed cert under F<t/servroot/cert/>.
+
+=head2 TEST_NGINX_SSL_KEY
+
+Private key companion of L<TEST_NGINX_SSL_CRT>.
+
 =head2 TEST_NGINX_HTTP3_CRT
 
 When running in http3 mode, you need to specify the default certificate.
@@ -5055,4 +5315,4 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 =head1 SEE ALSO
 
-L<Test::Nginx::Lua>, L<Test::Nginx::Lua::Stream>, L<Test::Nginx::LWP>, L<Test::Base>.
+L<Test::Nginx::Socket::Lua>, L<Test::Nginx::Socket::Lua::Stream>, L<Test::Nginx::Socket::UTLS>, L<Test::Nginx::LWP>, L<Test::Base>.

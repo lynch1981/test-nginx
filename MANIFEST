@@ -33,3 +33,11 @@ t/valgrind_command.t
 lib/Test/Nginx/Socket/Lua.pm
 lib/Test/Nginx/Socket/Lua/Stream.pm
 lib/Test/Nginx/Socket/Lua/Dgram.pm
+lib/Test/Nginx/Socket/UTLS.pm
+go/utls-client/main.go
+go/utls-client/main_test.go
+go/utls-client/go.mod
+go/utls-client/go.sum
+t/use_utls.t
+t/gen_utls_cmd.t
+t/utls-nginx.t

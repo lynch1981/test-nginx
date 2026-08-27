@@ -38,6 +38,18 @@ our $UseHttp3 = $ENV{TEST_NGINX_USE_HTTP3};
 
 our $UseHttp2 = $ENV{TEST_NGINX_USE_HTTP2};
 
+our $UseUtls = $ENV{TEST_NGINX_USE_UTLS};
+
+our $UtlsClient = $ENV{TEST_NGINX_UTLS_CLIENT} || 'chrome';
+
+our $UtlsBinary = $ENV{TEST_NGINX_UTLS_BINARY};
+
+our $UtlsVerify = $ENV{TEST_NGINX_UTLS_VERIFY};
+
+our $SslCrt = $ENV{TEST_NGINX_SSL_CRT} || $ENV{TEST_NGINX_HTTP3_CRT};
+
+our $SslKey = $ENV{TEST_NGINX_SSL_KEY} || $ENV{TEST_NGINX_HTTP3_KEY};
+
 our $UseHup = $ENV{TEST_NGINX_USE_HUP};
 
 our $UseRr = $ENV{TEST_NGINX_USE_RR};
@@ -58,6 +70,7 @@ our $Profiling = 0;
 sub expand_env_in_text ($$$);
 sub use_http2 ($);
 sub use_http3 ($);
+sub use_utls ($);
 
 our $InSubprocess;
 our $RepeatEach = 1;
@@ -100,6 +113,10 @@ our $ValgrindExtraTimeout = 0.3;
 
 if ($UseHttp2 && $UseHttp3) {
     die "Ambiguous: both TEST_NGINX_USE_HTTP3 and TEST_NGINX_USE_HTTP2 are set.\n";
+}
+
+if ($UseUtls && $UseHttp3) {
+    die "Ambiguous: both TEST_NGINX_USE_UTLS and TEST_NGINX_USE_HTTP3 are set.\n";
 }
 
 sub bail_out (@);
@@ -571,6 +588,8 @@ our @EXPORT = qw(
     expand_env_in_text
     use_http2
     use_http3
+    use_utls
+    resolve_utls_binary
     env_to_nginx
     is_str
     check_accum_error_log
@@ -1115,7 +1134,8 @@ sub setup_server_root ($) {
             }}, $ServRoot);
 
         } else {
-            remove_tree($CacheDir, $HtmlDir, $LogDir);
+            remove_tree($CacheDir, $HtmlDir, $LogDir,
+                        File::Spec->catfile($ServRoot, 'cert'));
             rmdir $ServRoot or
                 bail_out "Can't remove $ServRoot (not empty?): $!";
         }
@@ -1376,6 +1396,22 @@ _EOC_
         $listen_opts .= " reuseport";
     }
 
+    my $ssl_config = '';
+    if (use_utls($block)) {
+        my ($crt, $key) = ensure_ssl_certs();
+        my $has_ssl_listen = 0;
+        if (defined $config && $config =~ /\blisten\b[^;]*\bssl\b/) {
+            $has_ssl_listen = 1;
+        }
+        if (defined $http_config && $http_config =~ /\blisten\b[^;]*\bssl\b/) {
+            $has_ssl_listen = 1;
+        }
+        if (!$has_ssl_listen && $listen_opts !~ /\bssl\b/) {
+            $listen_opts = " ssl" . $listen_opts;
+        }
+        $ssl_config = "ssl_certificate $crt; ssl_certificate_key $key; ssl_protocols TLSv1.2 TLSv1.3;";
+    }
+
     my $keepalive_timeout = 68000;
     if (use_http3($block)) {
         my $keepalive_timeout_sec = $QuicIdleTimeout;
@@ -1454,6 +1490,7 @@ _EOC_
     print $out <<_EOC_;
         server_name     '$server_name';
         $ServerConfigHttp3
+        $ssl_config
         client_max_body_size 30M;
         #client_body_buffer_size 4k;
 
@@ -1483,6 +1520,7 @@ _EOC_
     server {
         listen          $ServerPort$listen_opts; $http2_directive
         server_name     'Test-Nginx';
+        $ssl_config
 
         location = /ver {
             return 200 '$ConfigVersion';
@@ -3488,6 +3526,156 @@ sub use_http3 ($) {
     }
 
     $block->set_value("test_nginx_enabled_http3", 0);
+    return undef;
+}
+
+sub resolve_utls_binary {
+    if (defined $UtlsBinary && length $UtlsBinary) {
+        return $UtlsBinary;
+    }
+
+    my @candidates = (
+        File::Spec->catfile(cwd(), 'go', 'utls-client', 'test-nginx-utls'),
+    );
+
+    if (defined $INC{'Test/Nginx/Util.pm'}) {
+        my $util = $INC{'Test/Nginx/Util.pm'};
+        my $dir = $util;
+        $dir =~ s{/Util\.pm$}{};
+        my $root = File::Spec->catdir($dir, File::Spec->updir, File::Spec->updir,
+                                      File::Spec->updir);
+        push @candidates, File::Spec->rel2abs(
+            File::Spec->catfile($root, 'go', 'utls-client', 'test-nginx-utls'));
+    }
+
+    for my $dir (File::Spec->path) {
+        push @candidates, File::Spec->catfile($dir, 'test-nginx-utls');
+    }
+
+    for my $c (@candidates) {
+        return $c if defined $c && -x $c;
+    }
+
+    return 'test-nginx-utls';
+}
+
+sub ensure_ssl_certs {
+    my $crt = $SslCrt;
+    my $key = $SslKey;
+
+    if (defined $crt && $crt ne '' && defined $key && $key ne ''
+        && -f $crt && -f $key)
+    {
+        $ENV{TEST_NGINX_SSL_CRT} = $crt;
+        $ENV{TEST_NGINX_SSL_KEY} = $key;
+        return ($crt, $key);
+    }
+
+    my $dir = File::Spec->catfile($ServRoot, 'cert');
+    if (!-d $dir) {
+        make_path($dir) or bail_out "Failed to create $dir: $!";
+    }
+
+    $crt = File::Spec->catfile($dir, 'test.crt');
+    $key = File::Spec->catfile($dir, 'test.key');
+
+    if (!-f $crt || !-f $key) {
+        my $null = File::Spec->devnull();
+        open my $old_stderr, '>&STDERR' or die $!;
+        open my $old_stdout, '>&STDOUT' or die $!;
+        open STDERR, '>', $null or die $!;
+        open STDOUT, '>', $null or die $!;
+        my $rc = system(
+            'openssl', 'req', '-x509', '-newkey', 'rsa:2048',
+            '-keyout', $key, '-out', $crt,
+            '-days', '3650', '-nodes', '-batch',
+            '-subj', '/CN=localhost',
+        );
+        open STDERR, '>&', $old_stderr;
+        open STDOUT, '>&', $old_stdout;
+        close $old_stderr;
+        close $old_stdout;
+        if ($rc != 0 || !-f $crt || !-f $key) {
+            bail_out("Failed to generate a self-signed TLS certificate with openssl "
+                     . "(needed for the uTLS backend)");
+        }
+    }
+
+    $SslCrt = $crt;
+    $SslKey = $key;
+    $ENV{TEST_NGINX_SSL_CRT} = $crt;
+    $ENV{TEST_NGINX_SSL_KEY} = $key;
+    return ($crt, $key);
+}
+
+sub use_utls ($) {
+    my $block = shift;
+
+    my $cached = $block->test_nginx_enabled_utls;
+    if (defined $cached) {
+        return $cached;
+    }
+
+    if (defined $block->no_utls) {
+        return undef;
+    }
+
+    if (defined $block->utls) {
+        if ($block->raw_request) {
+            bail_out("cannot use --- utls with --- raw_request");
+        }
+
+        if ($block->pipelined_requests) {
+            bail_out("cannot use --- utls with --- pipelined_requests");
+        }
+
+        if (defined $block->http3 || $UseHttp3) {
+            bail_out("cannot use --- utls with --- http3 / TEST_NGINX_USE_HTTP3");
+        }
+
+        $block->set_value("test_nginx_enabled_utls", 1);
+
+        if (!$LoadedIPCRun) {
+            require IPC::Run;
+            $LoadedIPCRun = 1;
+        }
+        return 1;
+    }
+
+    if ($UseUtls) {
+        if ($block->raw_request) {
+            warn "WARNING: ", $block->name, " - using raw_request, will not use uTLS\n";
+            $block->set_value("test_nginx_enabled_utls", 0);
+            return undef;
+        }
+
+        if ($block->pipelined_requests) {
+            warn "WARNING: ", $block->name, " - using pipelined_requests, will not use uTLS\n";
+            $block->set_value("test_nginx_enabled_utls", 0);
+            return undef;
+        }
+
+        if (!defined $block->request) {
+            $block->set_value("test_nginx_enabled_utls", 0);
+            return undef;
+        }
+
+        if (defined $block->http3 || $UseHttp3) {
+            warn "WARNING: ", $block->name, " - HTTP/3 mode is on, so will not use uTLS\n";
+            $block->set_value("test_nginx_enabled_utls", 0);
+            return undef;
+        }
+
+        $block->set_value("test_nginx_enabled_utls", 1);
+
+        if (!$LoadedIPCRun) {
+            require IPC::Run;
+            $LoadedIPCRun = 1;
+        }
+        return 1;
+    }
+
+    $block->set_value("test_nginx_enabled_utls", 0);
     return undef;
 }
 

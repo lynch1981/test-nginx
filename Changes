@@ -1,5 +1,10 @@
 Changes for Test::Nginx
 
+0.33
+
+*    feature: add a uTLS SSL-client backend (test-nginx-utls) that parrots
+     browser ClientHello fingerprints via refraction-networking/utls.
+
 0.32 - 2026-03-03
 
 *    feature: add TEST_NGINX_VALGRIND_QUICK for faster Memcheck runs.

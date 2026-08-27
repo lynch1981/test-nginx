@@ -39,6 +39,10 @@ L<Test::Nginx::Socket::Lua::Stream>
 
 L<Test::Nginx::Socket::Lua::Dgram>
 
+=item *
+
+L<Test::Nginx::Socket::UTLS> (TLS requests with browser ClientHello fingerprints via uTLS)
+
 =back
 
 =item *
@@ -64,6 +68,10 @@ port number by setting his port number to the C<TEST_NGINX_PORT> environment,
 as in
 
     export TEST_NGINX_PORT=1989
+
+To send requests as a browser-like TLS client, enable the uTLS backend
+(L<Test::Nginx::Socket::UTLS> or C<TEST_NGINX_USE_UTLS=1> /
+C<--- utls>). See L<Test::Nginx::Socket/utls>.
 
 =head1 User Guide
 
@@ -230,5 +238,5 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 =head1 SEE ALSO
 
-L<Test::Nginx::LWP>, L<Test::Nginx::Socket>, L<Test::Base>.
+L<Test::Nginx::LWP>, L<Test::Nginx::Socket>, L<Test::Nginx::Socket::UTLS>, L<Test::Base>.
 

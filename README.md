@@ -29,6 +29,7 @@ This distribution provides two testing modules for Nginx C module development:
     - [Test::Nginx::Socket::Lua](https://metacpan.org/pod/Test%3A%3ANginx%3A%3ASocket%3A%3ALua)
     - [Test::Nginx::Socket::Lua::Stream](https://metacpan.org/pod/Test%3A%3ANginx%3A%3ASocket%3A%3ALua%3A%3AStream)
     - [Test::Nginx::Socket::Lua::Dgram](https://metacpan.org/pod/Test%3A%3ANginx%3A%3ASocket%3A%3ALua%3A%3ADgram)
+    - [Test::Nginx::Socket::UTLS](https://metacpan.org/pod/Test%3A%3ANginx%3A%3ASocket%3A%3AUTLS) (TLS client that parrots Chrome/Firefox/Safari/… ClientHellos via [uTLS](https://github.com/refraction-networking/utls))
 
 - [Test::Nginx::LWP](https://metacpan.org/pod/Test%3A%3ANginx%3A%3ALWP) (This is obsolete.)
 
@@ -49,6 +50,17 @@ port number by setting his port number to the `TEST_NGINX_PORT` environment,
 as in
 
     export TEST_NGINX_PORT=1989
+
+To send requests as a browser-like TLS client (Chrome, Firefox, Safari, iOS,
+Android, …), use the uTLS backend:
+
+    export TEST_NGINX_USE_UTLS=1
+    export TEST_NGINX_UTLS_CLIENT=chrome
+    prove t
+
+or `use Test::Nginx::Socket::UTLS;` / a per-block `--- utls` section.
+That path shells out to `go/utls-client/test-nginx-utls` (built by `make`
+when Go is available).
 
 # User Guide
 

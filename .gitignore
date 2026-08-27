@@ -38,7 +38,8 @@ Makefile.old
 MYMETA.json
 MYMETA.yml
 META.yml
-go
+go/utls-client/test-nginx-utls
+go/utls-client/test-nginx-utls.exe
 t/servroot/
 *.diff
 *.pdf

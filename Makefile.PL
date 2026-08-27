@@ -34,4 +34,31 @@ auto_install();
 
 #tests('t/*.t t/*/*.t');
 
+{
+    package MY;
+    sub postamble {
+        my $self = shift;
+        my $frag = '';
+        if ($self->can('SUPER::postamble')) {
+            $frag = $self->SUPER::postamble(@_);
+            $frag = '' unless defined $frag;
+        }
+        return $frag unless _have_go();
+        $frag .= <<'MAKE_FRAG';
+
+.PHONY: utls-client
+utls-client:
+	cd go/utls-client && go build -o test-nginx-utls .
+
+all :: utls-client
+MAKE_FRAG
+        return $frag;
+    }
+
+    sub _have_go {
+        my $go = `command -v go 2>/dev/null`;
+        return defined $go && $go =~ /\S/;
+    }
+}
+
 WriteAll();
